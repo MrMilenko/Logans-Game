@@ -1,0 +1,17 @@
+# Godot
+.godot/
+*.tmp
+*.log
+
+# macOS
+.DS_Store
+*.swp
+
+# Editor
+*.sublime-*
+.vscode/
+
+# Export
+export/
+*.dmg
+*.app

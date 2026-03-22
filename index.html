@@ -1,0 +1,1393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Suburb Chaos</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { overflow: hidden; background: #000; }
+        canvas { display: block; width: 100vw; height: 100vh; }
+        #loading {
+            position: fixed; inset: 0; display: flex; flex-direction: column;
+            align-items: center; justify-content: center;
+            background: #1a1a2e; color: #e94560; font-family: 'Comic Sans MS', cursive;
+            font-size: 2rem; z-index: 100;
+        }
+        #loading .subtitle { font-size: 1rem; color: #fff; margin-top: 0.5rem; }
+        #loading .spinner {
+            width: 60px; height: 60px; border: 6px solid #333;
+            border-top-color: #e94560; border-radius: 50%;
+            animation: spin 0.8s linear infinite; margin-bottom: 1rem;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        #hud {
+            position: fixed; bottom: 20px; left: 20px; color: #fff;
+            font-family: 'Comic Sans MS', cursive; font-size: 0.9rem;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.8); z-index: 10;
+            pointer-events: none;
+        }
+        #speed { font-size: 1.8rem; font-weight: bold; }
+        #drift-indicator {
+            color: #ff6b35; font-size: 1.2rem; font-weight: bold;
+            opacity: 0; transition: opacity 0.15s;
+        }
+        #drift-indicator.active { opacity: 1; }
+        #controls-hint {
+            position: fixed; top: 20px; right: 20px; color: rgba(255,255,255,0.6);
+            font-family: 'Comic Sans MS', cursive; font-size: 0.75rem;
+            text-shadow: 1px 1px 2px rgba(0,0,0,0.8); z-index: 10;
+            pointer-events: none; text-align: right; line-height: 1.6;
+        }
+        #vehicle-prompt {
+            position: fixed; bottom: 15%; left: 50%; transform: translateX(-50%);
+            color: #fff; font-family: 'Comic Sans MS', cursive; font-size: 1.2rem;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.8); z-index: 10;
+            pointer-events: none; opacity: 0; transition: opacity 0.2s;
+            background: rgba(0,0,0,0.4); padding: 8px 16px; border-radius: 8px;
+        }
+        #vehicle-prompt.visible { opacity: 1; }
+        #reset-hint {
+            position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
+            color: #ff6b35; font-family: 'Comic Sans MS', cursive; font-size: 1rem;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.8); z-index: 10;
+            pointer-events: none; opacity: 0; transition: opacity 0.3s;
+        }
+    </style>
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+        }
+    }
+    </script>
+</head>
+<body>
+    <div id="loading">
+        <div class="spinner"></div>
+        SUBURB CHAOS
+        <div class="subtitle">Loading physics engine...</div>
+    </div>
+    <div id="hud">
+        <div id="speed">0</div>
+        <div>MPH</div>
+        <div id="drift-indicator">DRIFTING!</div>
+    </div>
+    <div id="controls-hint">
+        WASD / Arrows — Drive<br>
+        SPACE — Drift<br>
+        E — Exit Cart<br>
+        R — Reset Cart
+    </div>
+    <div id="vehicle-prompt">Press E to enter vehicle</div>
+    <div id="reset-hint">Press R to reset cart</div>
+    <canvas id="game"></canvas>
+
+    <script type="module">
+import * as THREE from 'three';
+
+// ========== SECTION 0: CONFIG ==========
+const CONFIG = {
+    cart: {
+        mass: 50,
+        maxSpeed: 30,
+        maxEngineForce: 200,
+        maxReverseForce: 80,
+        maxSteerAngle: 0.45,
+        // Drift tuning
+        gripNormal: 0.92,
+        gripDrift: 0.3,
+        gripHandbrake: 0.18,
+        driftThreshold: 6,
+        angularDamping: 3.0,
+        linearDamping: 0.4,
+        steerTorqueMultiplier: 0.12,
+        // Anti-flip
+        antiFlipTorque: 8.0,
+        antiFlipThreshold: 0.4, // radians
+    },
+    suspension: {
+        stiffness: 30,
+        compression: 2.0,
+        relaxation: 3.5,
+        restLength: 0.35,
+        maxTravel: 0.3,
+        maxForce: 6000,
+    },
+    wheel: {
+        radius: 0.22,
+        frictionSlip: 2.5,
+        sideFrictionStiffness: 1.0,
+    },
+    camera: {
+        offset: new THREE.Vector3(0, 4, 9),
+        lookAhead: new THREE.Vector3(0, 0.8, -5),
+        smoothPosition: 0.04,
+        smoothLookAt: 0.08,
+        smoothPositionDrift: 0.025,
+        fovNormal: 65,
+        fovDrift: 72,
+        fovSmooth: 0.03,
+    },
+    world: {
+        blockSize: 40,
+        gridSize: 3,       // 3x3 blocks
+        roadWidth: 8,
+        sidewalkWidth: 2,
+        sidewalkHeight: 0.12,
+    },
+    player: {
+        runSpeed: 12,
+        jumpImpulse: 8,
+        capsuleHalfHeight: 0.35,
+        capsuleRadius: 0.25,
+        maxSlopeAngle: 0.8,
+        snapToGround: 0.3,
+        enterExitRadius: 3.5,
+        exitOffset: 2.0,
+        cameraOffset: new THREE.Vector3(0, 4, 6),
+        cameraLookAhead: new THREE.Vector3(0, 1.0, 0),
+        cameraSmoothPos: 0.15,
+        cameraSmoothLook: 0.2,
+    },
+};
+
+// Expose for console tuning
+window.CONFIG = CONFIG;
+
+// ========== SECTION 1: INPUT MANAGER ==========
+const Input = {
+    forward: false, backward: false, left: false, right: false,
+    handbrake: false, reset: false,
+    interact: false, interactPressed: false,
+};
+
+window.addEventListener('keydown', (e) => {
+    switch (e.code) {
+        case 'KeyW': case 'ArrowUp':    Input.forward = true; break;
+        case 'KeyS': case 'ArrowDown':  Input.backward = true; break;
+        case 'KeyA': case 'ArrowLeft':  Input.left = true; break;
+        case 'KeyD': case 'ArrowRight': Input.right = true; break;
+        case 'Space':                    Input.handbrake = true; e.preventDefault(); break;
+        case 'KeyR':                     Input.reset = true; break;
+        case 'KeyE':                     Input.interact = true; Input.interactPressed = true; break;
+    }
+});
+window.addEventListener('keyup', (e) => {
+    switch (e.code) {
+        case 'KeyW': case 'ArrowUp':    Input.forward = false; break;
+        case 'KeyS': case 'ArrowDown':  Input.backward = false; break;
+        case 'KeyA': case 'ArrowLeft':  Input.left = false; break;
+        case 'KeyD': case 'ArrowRight': Input.right = false; break;
+        case 'Space':                    Input.handbrake = false; break;
+        case 'KeyR':                     Input.reset = false; break;
+        case 'KeyE':                     Input.interact = false; break;
+    }
+});
+
+function getThrottle() {
+    if (Input.forward && Input.backward) return 0;
+    if (Input.forward) return 1;
+    if (Input.backward) return -1;
+    return 0;
+}
+
+function getSteering() {
+    if (Input.left && Input.right) return 0;
+    if (Input.left) return 1;
+    if (Input.right) return -1;
+    return 0;
+}
+
+// ========== SECTION 2: RAPIER LOADING ==========
+async function loadRapier() {
+    const RAPIER = await import('https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.14.0/rapier.es.js');
+    await RAPIER.init();
+    return RAPIER;
+}
+
+// ========== SECTION 3: SCENE SETUP ==========
+function createScene() {
+    const canvas = document.getElementById('game');
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.1;
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x87CEEB);
+    scene.fog = new THREE.Fog(0x87CEEB, 60, 150);
+
+    const camera = new THREE.PerspectiveCamera(CONFIG.camera.fovNormal, window.innerWidth / window.innerHeight, 0.1, 300);
+    camera.position.set(0, 5, 10);
+
+    // Lights
+    const ambient = new THREE.AmbientLight(0xffffff, 0.7);
+    scene.add(ambient);
+
+    const sun = new THREE.DirectionalLight(0xfff5e6, 1.2);
+    sun.position.set(40, 60, 30);
+    sun.castShadow = true;
+    sun.shadow.mapSize.set(2048, 2048);
+    sun.shadow.camera.left = -80;
+    sun.shadow.camera.right = 80;
+    sun.shadow.camera.top = 80;
+    sun.shadow.camera.bottom = -80;
+    sun.shadow.camera.near = 1;
+    sun.shadow.camera.far = 200;
+    sun.shadow.bias = -0.001;
+    scene.add(sun);
+
+    // Hemisphere light for better ambient
+    const hemi = new THREE.HemisphereLight(0x87CEEB, 0x556B2F, 0.3);
+    scene.add(hemi);
+
+    window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    return { renderer, scene, camera };
+}
+
+// ========== SECTION 4: MATERIALS ==========
+function createMaterials() {
+    return {
+        road: new THREE.MeshStandardMaterial({ color: 0x555555, roughness: 0.9 }),
+        roadLine: new THREE.MeshStandardMaterial({ color: 0xf5d442, roughness: 0.8 }),
+        sidewalk: new THREE.MeshStandardMaterial({ color: 0xccccbb, roughness: 0.85 }),
+        grass: new THREE.MeshStandardMaterial({ color: 0x4a9e3f, roughness: 0.95 }),
+        // House colors
+        houses: [
+            new THREE.MeshStandardMaterial({ color: 0xf0e6d3, roughness: 0.8 }), // cream
+            new THREE.MeshStandardMaterial({ color: 0xb5d4e8, roughness: 0.8 }), // light blue
+            new THREE.MeshStandardMaterial({ color: 0xf5e6a3, roughness: 0.8 }), // pale yellow
+            new THREE.MeshStandardMaterial({ color: 0xe8b5b5, roughness: 0.8 }), // salmon
+            new THREE.MeshStandardMaterial({ color: 0xc5e8b5, roughness: 0.8 }), // light green
+            new THREE.MeshStandardMaterial({ color: 0xe8d5f0, roughness: 0.8 }), // lavender
+        ],
+        roof: new THREE.MeshStandardMaterial({ color: 0x8B4513, roughness: 0.85 }),
+        roofAlt: new THREE.MeshStandardMaterial({ color: 0x654321, roughness: 0.85 }),
+        door: new THREE.MeshStandardMaterial({ color: 0x6B3A2A, roughness: 0.7 }),
+        window: new THREE.MeshStandardMaterial({ color: 0x88ccff, roughness: 0.3, metalness: 0.1 }),
+        treeTrunk: new THREE.MeshStandardMaterial({ color: 0x6B4226, roughness: 0.9 }),
+        treeCanopy: new THREE.MeshStandardMaterial({ color: 0x2d7d2d, roughness: 0.9 }),
+        treeCanopyLight: new THREE.MeshStandardMaterial({ color: 0x3a9a3a, roughness: 0.9 }),
+        cartBody: new THREE.MeshStandardMaterial({ color: 0xff3333, roughness: 0.5, metalness: 0.2 }),
+        cartSeat: new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.8 }),
+        cartWheel: new THREE.MeshStandardMaterial({ color: 0x333333, roughness: 0.7 }),
+        cartBumper: new THREE.MeshStandardMaterial({ color: 0xcccccc, roughness: 0.5, metalness: 0.4 }),
+        cartAxle: new THREE.MeshStandardMaterial({ color: 0x555555, roughness: 0.6, metalness: 0.3 }),
+        mailbox: new THREE.MeshStandardMaterial({ color: 0x2255bb, roughness: 0.7 }),
+        mailboxPost: new THREE.MeshStandardMaterial({ color: 0x8B7355, roughness: 0.8 }),
+        trashCan: new THREE.MeshStandardMaterial({ color: 0x2a5a2a, roughness: 0.7 }),
+        ramp: new THREE.MeshStandardMaterial({ color: 0xffcc00, roughness: 0.6 }),
+        rampStripe: new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.7 }),
+        fence: new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.8 }),
+        character: new THREE.MeshStandardMaterial({ color: 0xff8844, roughness: 0.6 }),
+        characterHead: new THREE.MeshStandardMaterial({ color: 0xffcc99, roughness: 0.7 }),
+    };
+}
+
+// ========== SECTION 5: WORLD BUILDER ==========
+function buildWorld(scene, physicsWorld, RAPIER, mats) {
+    const { blockSize, gridSize, roadWidth, sidewalkWidth, sidewalkHeight } = CONFIG.world;
+    const worldSize = blockSize * gridSize + roadWidth;
+    const halfWorld = worldSize / 2;
+    const dynamicBodies = []; // { mesh, body } pairs for knockable objects
+
+    // Seeded random for consistent world
+    let seed = 12345;
+    function rand() {
+        seed = (seed * 16807 + 0) % 2147483647;
+        return (seed - 1) / 2147483646;
+    }
+    function randRange(min, max) { return min + rand() * (max - min); }
+    function pick(arr) { return arr[Math.floor(rand() * arr.length)]; }
+
+    // --- Ground ---
+    const groundGeo = new THREE.PlaneGeometry(worldSize + 40, worldSize + 40);
+    const ground = new THREE.Mesh(groundGeo, mats.grass);
+    ground.rotation.x = -Math.PI / 2;
+    ground.receiveShadow = true;
+    scene.add(ground);
+
+    // Ground collider
+    const groundBody = physicsWorld.createRigidBody(RAPIER.RigidBodyDesc.fixed());
+    const groundCollider = RAPIER.ColliderDesc.cuboid(halfWorld + 20, 0.1, halfWorld + 20)
+        .setTranslation(0, -0.1, 0);
+    physicsWorld.createCollider(groundCollider, groundBody);
+
+    // --- Roads ---
+    const roads = [];
+    for (let i = 0; i <= gridSize; i++) {
+        const pos = -halfWorld + roadWidth / 2 + i * blockSize;
+
+        // Horizontal road (along X)
+        const hRoadGeo = new THREE.PlaneGeometry(worldSize + 20, roadWidth);
+        const hRoad = new THREE.Mesh(hRoadGeo, mats.road);
+        hRoad.rotation.x = -Math.PI / 2;
+        hRoad.position.set(0, 0.01, pos);
+        hRoad.receiveShadow = true;
+        scene.add(hRoad);
+
+        // Center line
+        const hLineGeo = new THREE.PlaneGeometry(worldSize + 20, 0.15);
+        const hLine = new THREE.Mesh(hLineGeo, mats.roadLine);
+        hLine.rotation.x = -Math.PI / 2;
+        hLine.position.set(0, 0.02, pos);
+        scene.add(hLine);
+
+        // Vertical road (along Z)
+        const vRoadGeo = new THREE.PlaneGeometry(roadWidth, worldSize + 20);
+        const vRoad = new THREE.Mesh(vRoadGeo, mats.road);
+        vRoad.rotation.x = -Math.PI / 2;
+        vRoad.position.set(pos, 0.01, 0);
+        vRoad.receiveShadow = true;
+        scene.add(vRoad);
+
+        // Center line
+        const vLineGeo = new THREE.PlaneGeometry(0.15, worldSize + 20);
+        const vLine = new THREE.Mesh(vLineGeo, mats.roadLine);
+        vLine.rotation.x = -Math.PI / 2;
+        vLine.position.set(pos, 0.02, 0);
+        scene.add(vLine);
+    }
+
+    // --- Sidewalks and Houses ---
+    for (let bx = 0; bx < gridSize; bx++) {
+        for (let bz = 0; bz < gridSize; bz++) {
+            const blockX = -halfWorld + roadWidth + bx * blockSize;
+            const blockZ = -halfWorld + roadWidth + bz * blockSize;
+            const innerSize = blockSize - roadWidth;
+
+            // Sidewalk around block
+            const swGeo = new THREE.PlaneGeometry(innerSize + sidewalkWidth * 2, innerSize + sidewalkWidth * 2);
+            const sw = new THREE.Mesh(swGeo, mats.sidewalk);
+            sw.rotation.x = -Math.PI / 2;
+            sw.position.set(blockX + innerSize / 2, sidewalkHeight, blockZ + innerSize / 2);
+            sw.receiveShadow = true;
+            scene.add(sw);
+
+            // Inner grass
+            const innerGrassGeo = new THREE.PlaneGeometry(innerSize - sidewalkWidth * 2, innerSize - sidewalkWidth * 2);
+            const innerGrass = new THREE.Mesh(innerGrassGeo, mats.grass);
+            innerGrass.rotation.x = -Math.PI / 2;
+            innerGrass.position.set(blockX + innerSize / 2, sidewalkHeight + 0.01, blockZ + innerSize / 2);
+            innerGrass.receiveShadow = true;
+            scene.add(innerGrass);
+
+            // Sidewalk curb collider (thin wall around sidewalk edge)
+            // Just add a small step-up collider
+            const curbBody = physicsWorld.createRigidBody(RAPIER.RigidBodyDesc.fixed());
+            // We'll skip curb colliders — houses provide the barriers
+
+            // Houses on each side of the block
+            const housesPerSide = 3;
+            const lotWidth = innerSize / housesPerSide;
+
+            // 4 sides: 0=south(+z), 1=north(-z face), 2=west(-x), 3=east(+x)
+            for (let side = 0; side < 4; side++) {
+                for (let h = 0; h < housesPerSide; h++) {
+                    const houseWidth = lotWidth * 0.7;
+                    const houseDepth = randRange(4, 6);
+                    const houseHeight = randRange(3.5, 5.5);
+                    const houseMat = pick(mats.houses);
+                    const roofMat = rand() > 0.5 ? mats.roof : mats.roofAlt;
+
+                    const houseGroup = new THREE.Group();
+
+                    // House body
+                    const bodyGeo = new THREE.BoxGeometry(houseWidth, houseHeight, houseDepth);
+                    const body = new THREE.Mesh(bodyGeo, houseMat);
+                    body.position.y = houseHeight / 2;
+                    body.castShadow = true;
+                    body.receiveShadow = true;
+                    houseGroup.add(body);
+
+                    // Roof (pyramid)
+                    const roofGeo = new THREE.ConeGeometry(houseWidth * 0.75, houseHeight * 0.4, 4);
+                    const roofMesh = new THREE.Mesh(roofGeo, roofMat);
+                    roofMesh.position.y = houseHeight + houseHeight * 0.2;
+                    roofMesh.rotation.y = Math.PI / 4;
+                    roofMesh.castShadow = true;
+                    houseGroup.add(roofMesh);
+
+                    // Door
+                    const doorGeo = new THREE.BoxGeometry(0.8, 1.5, 0.1);
+                    const doorMesh = new THREE.Mesh(doorGeo, mats.door);
+                    doorMesh.position.y = 0.75;
+
+                    // Windows
+                    const winGeo = new THREE.BoxGeometry(0.7, 0.7, 0.1);
+                    const win1 = new THREE.Mesh(winGeo, mats.window);
+                    win1.position.y = houseHeight * 0.55;
+                    const win2 = win1.clone();
+
+                    // Position door and windows based on facing direction
+                    doorMesh.position.z = houseDepth / 2 + 0.05;
+                    win1.position.z = houseDepth / 2 + 0.05;
+                    win1.position.x = -houseWidth * 0.25;
+                    win2.position.z = houseDepth / 2 + 0.05;
+                    win2.position.x = houseWidth * 0.25;
+                    win2.position.y = houseHeight * 0.55;
+
+                    houseGroup.add(doorMesh, win1, win2);
+
+                    // Position house in lot
+                    let hx, hz, hy = sidewalkHeight;
+                    const lotOffset = (h + 0.5) * lotWidth;
+                    const setback = sidewalkWidth + houseDepth / 2 + 1;
+
+                    if (side === 0) { // south face
+                        hx = blockX + lotOffset;
+                        hz = blockZ + innerSize - setback;
+                        houseGroup.rotation.y = Math.PI;
+                    } else if (side === 1) { // north face
+                        hx = blockX + lotOffset;
+                        hz = blockZ + setback;
+                        houseGroup.rotation.y = 0;
+                    } else if (side === 2) { // west face
+                        hx = blockX + setback;
+                        hz = blockZ + lotOffset;
+                        houseGroup.rotation.y = Math.PI / 2;
+                    } else { // east face
+                        hx = blockX + innerSize - setback;
+                        hz = blockZ + lotOffset;
+                        houseGroup.rotation.y = -Math.PI / 2;
+                    }
+
+                    houseGroup.position.set(hx, hy, hz);
+                    scene.add(houseGroup);
+
+                    // Physics collider for house
+                    const houseBody = physicsWorld.createRigidBody(RAPIER.RigidBodyDesc.fixed());
+                    const totalHeight = houseHeight + houseHeight * 0.4;
+                    const houseCollider = RAPIER.ColliderDesc.cuboid(houseWidth / 2, totalHeight / 2, houseDepth / 2)
+                        .setTranslation(hx, hy + totalHeight / 2, hz);
+                    physicsWorld.createCollider(houseCollider, houseBody);
+
+                    // Tree in front yard
+                    if (rand() > 0.3) {
+                        let tx = hx + randRange(-lotWidth * 0.3, lotWidth * 0.3);
+                        let tz = hz + (rand() - 0.5) * 4;
+                        if (side === 0) { tz = hz + houseDepth / 2 + randRange(1, 3); }
+                        else if (side === 1) { tz = hz - houseDepth / 2 - randRange(1, 3); }
+                        else if (side === 2) { tx = hx - houseDepth / 2 - randRange(1, 3); tz = hz + randRange(-2, 2); }
+                        else { tx = hx + houseDepth / 2 + randRange(1, 3); tz = hz + randRange(-2, 2); }
+
+                        const trunkHeight = randRange(1.5, 3);
+                        const canopyRadius = randRange(1.2, 2);
+
+                        const trunk = new THREE.Mesh(
+                            new THREE.CylinderGeometry(0.15, 0.2, trunkHeight),
+                            mats.treeTrunk
+                        );
+                        trunk.position.set(tx, hy + trunkHeight / 2, tz);
+                        trunk.castShadow = true;
+                        scene.add(trunk);
+
+                        const canopy = new THREE.Mesh(
+                            new THREE.ConeGeometry(canopyRadius, canopyRadius * 2, 8),
+                            rand() > 0.5 ? mats.treeCanopy : mats.treeCanopyLight
+                        );
+                        canopy.position.set(tx, hy + trunkHeight + canopyRadius * 0.7, tz);
+                        canopy.castShadow = true;
+                        scene.add(canopy);
+
+                        // Tree collider (just trunk)
+                        const treeBody = physicsWorld.createRigidBody(RAPIER.RigidBodyDesc.fixed());
+                        physicsWorld.createCollider(
+                            RAPIER.ColliderDesc.cylinder(trunkHeight / 2, 0.2)
+                                .setTranslation(tx, hy + trunkHeight / 2, tz),
+                            treeBody
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // --- Knockable Props: Mailboxes and Trash Cans ---
+    function addMailbox(x, z) {
+        const group = new THREE.Group();
+        // Post
+        const post = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 1.0), mats.mailboxPost);
+        post.position.y = 0.5;
+        group.add(post);
+        // Box
+        const box = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.3, 0.25), mats.mailbox);
+        box.position.y = 1.05;
+        group.add(box);
+
+        group.position.set(x, sidewalkHeight, z);
+        group.castShadow = true;
+        scene.add(group);
+
+        // Dynamic body
+        const rbDesc = RAPIER.RigidBodyDesc.dynamic()
+            .setTranslation(x, sidewalkHeight + 0.65, z)
+            .setLinearDamping(0.5)
+            .setAngularDamping(0.5);
+        const rb = physicsWorld.createRigidBody(rbDesc);
+        physicsWorld.createCollider(
+            RAPIER.ColliderDesc.cuboid(0.2, 0.65, 0.15).setMass(3),
+            rb
+        );
+        dynamicBodies.push({ mesh: group, body: rb, originY: sidewalkHeight });
+        return group;
+    }
+
+    function addTrashCan(x, z) {
+        const mesh = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.25, 0.3, 0.8, 8),
+            mats.trashCan
+        );
+        mesh.position.set(x, sidewalkHeight + 0.4, z);
+        mesh.castShadow = true;
+        scene.add(mesh);
+
+        const rbDesc = RAPIER.RigidBodyDesc.dynamic()
+            .setTranslation(x, sidewalkHeight + 0.4, z)
+            .setLinearDamping(0.5)
+            .setAngularDamping(0.5);
+        const rb = physicsWorld.createRigidBody(rbDesc);
+        physicsWorld.createCollider(
+            RAPIER.ColliderDesc.cylinder(0.4, 0.3).setMass(2),
+            rb
+        );
+        dynamicBodies.push({ mesh, body: rb, originY: sidewalkHeight + 0.4 });
+        return mesh;
+    }
+
+    // Place props along roads
+    for (let i = 0; i <= gridSize; i++) {
+        const roadPos = -halfWorld + roadWidth / 2 + i * blockSize;
+        for (let j = 0; j < 8; j++) {
+            const along = -halfWorld + 10 + j * (worldSize / 8);
+            if (rand() > 0.4) addMailbox(roadPos + roadWidth / 2 + sidewalkWidth * 0.6, along);
+            if (rand() > 0.5) addTrashCan(along, roadPos + roadWidth / 2 + sidewalkWidth * 0.6);
+        }
+    }
+
+    // --- Ramps ---
+    function addRamp(x, z, rotY) {
+        const group = new THREE.Group();
+
+        // Ramp visual - wedge using ExtrudeGeometry
+        const shape = new THREE.Shape();
+        shape.moveTo(0, 0);
+        shape.lineTo(3, 0);
+        shape.lineTo(0, 0.8);
+        shape.closePath();
+
+        const rampGeo = new THREE.ExtrudeGeometry(shape, { depth: 2.5, bevelEnabled: false });
+        const rampMesh = new THREE.Mesh(rampGeo, mats.ramp);
+        rampMesh.position.set(-1.5, 0, -1.25);
+        rampMesh.castShadow = true;
+        rampMesh.receiveShadow = true;
+        group.add(rampMesh);
+
+        group.position.set(x, 0.01, z);
+        group.rotation.y = rotY || 0;
+        scene.add(group);
+
+        // Physics: convex hull for the wedge shape
+        const rampBody = physicsWorld.createRigidBody(RAPIER.RigidBodyDesc.fixed());
+        const hullVerts = new Float32Array([
+            -1.5, 0, -1.25,   1.5, 0, -1.25,   1.5, 0, 1.25,   -1.5, 0, 1.25,  // base
+            -1.5, 0.8, -1.25,  -1.5, 0.8, 1.25,  // top edge
+        ]);
+        try {
+            const hullCollider = RAPIER.ColliderDesc.convexHull(hullVerts);
+            if (hullCollider) {
+                hullCollider.setTranslation(x, 0.01, z);
+                if (rotY) {
+                    hullCollider.setRotation({ x: 0, y: Math.sin(rotY / 2), z: 0, w: Math.cos(rotY / 2) });
+                }
+                physicsWorld.createCollider(hullCollider, rampBody);
+            }
+        } catch(e) {
+            // Fallback: tilted box
+            const fallback = RAPIER.ColliderDesc.cuboid(1.5, 0.4, 1.25)
+                .setTranslation(x, 0.4, z);
+            physicsWorld.createCollider(fallback, rampBody);
+        }
+    }
+
+    // Place some ramps
+    addRamp(0, 0, 0); // center of world
+    addRamp(blockSize * 0.8, -blockSize * 0.5, Math.PI / 4);
+    addRamp(-blockSize * 0.7, blockSize * 0.6, -Math.PI / 3);
+
+    // --- Fences (decorative, between some houses) ---
+    for (let i = 0; i < 12; i++) {
+        const fx = randRange(-halfWorld + 15, halfWorld - 15);
+        const fz = randRange(-halfWorld + 15, halfWorld - 15);
+        const fenceLen = randRange(2, 5);
+        const fenceGeo = new THREE.BoxGeometry(fenceLen, 0.8, 0.08);
+        const fenceMesh = new THREE.Mesh(fenceGeo, mats.fence);
+        fenceMesh.position.set(fx, sidewalkHeight + 0.4, fz);
+        fenceMesh.castShadow = true;
+        scene.add(fenceMesh);
+
+        // Fence posts
+        for (let fp = -1; fp <= 1; fp += 2) {
+            const post = new THREE.Mesh(
+                new THREE.BoxGeometry(0.08, 1.0, 0.08),
+                mats.fence
+            );
+            post.position.set(fx + fp * fenceLen / 2, sidewalkHeight + 0.5, fz);
+            scene.add(post);
+        }
+
+        const fenceBody = physicsWorld.createRigidBody(RAPIER.RigidBodyDesc.fixed());
+        physicsWorld.createCollider(
+            RAPIER.ColliderDesc.cuboid(fenceLen / 2, 0.5, 0.1)
+                .setTranslation(fx, sidewalkHeight + 0.5, fz),
+            fenceBody
+        );
+    }
+
+    return { dynamicBodies };
+}
+
+// ========== SECTION 6: CART ==========
+function createCart(scene, physicsWorld, RAPIER) {
+    const c = CONFIG.cart;
+    const s = CONFIG.suspension;
+    const w = CONFIG.wheel;
+
+    // --- Visual ---
+    const cartGroup = new THREE.Group();
+
+    // Body
+    const bodyGeo = new THREE.BoxGeometry(1.2, 0.35, 2.0);
+    const bodyMesh = new THREE.Mesh(bodyGeo, null); // material set below
+    bodyMesh.material = new THREE.MeshStandardMaterial({ color: 0xff2222, roughness: 0.4, metalness: 0.15 });
+    bodyMesh.position.y = 0.05;
+    bodyMesh.castShadow = true;
+    cartGroup.add(bodyMesh);
+
+    // Front bumper
+    const bumperGeo = new THREE.BoxGeometry(1.1, 0.2, 0.15);
+    const bumper = new THREE.Mesh(bumperGeo, new THREE.MeshStandardMaterial({ color: 0xdddddd, roughness: 0.4, metalness: 0.5 }));
+    bumper.position.set(0, -0.02, -1.05);
+    cartGroup.add(bumper);
+
+    // Rear bumper
+    const rearBumper = bumper.clone();
+    rearBumper.position.z = 1.05;
+    cartGroup.add(rearBumper);
+
+    // Seat
+    const seatGeo = new THREE.BoxGeometry(0.5, 0.2, 0.5);
+    const seat = new THREE.Mesh(seatGeo, new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.9 }));
+    seat.position.set(0, 0.32, 0.15);
+    cartGroup.add(seat);
+
+    // Seat back
+    const seatBackGeo = new THREE.BoxGeometry(0.5, 0.4, 0.1);
+    const seatBack = new THREE.Mesh(seatBackGeo, new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.9 }));
+    seatBack.position.set(0, 0.5, 0.4);
+    cartGroup.add(seatBack);
+
+    // Steering wheel (simple torus)
+    const steeringGeo = new THREE.TorusGeometry(0.12, 0.02, 8, 16);
+    const steering = new THREE.Mesh(steeringGeo, new THREE.MeshStandardMaterial({ color: 0x333333 }));
+    steering.position.set(0, 0.45, -0.2);
+    steering.rotation.x = Math.PI / 4;
+    cartGroup.add(steering);
+
+    // Character (simple blocky kid)
+    const charGroup = new THREE.Group();
+    // Torso
+    const torso = new THREE.Mesh(
+        new THREE.BoxGeometry(0.35, 0.4, 0.25),
+        new THREE.MeshStandardMaterial({ color: 0xff8844, roughness: 0.7 })
+    );
+    torso.position.y = 0.55;
+    charGroup.add(torso);
+    // Head
+    const head = new THREE.Mesh(
+        new THREE.BoxGeometry(0.25, 0.25, 0.25),
+        new THREE.MeshStandardMaterial({ color: 0xffcc99, roughness: 0.7 })
+    );
+    head.position.y = 0.88;
+    charGroup.add(head);
+    // Hat
+    const hat = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.18, 0.15, 0.12, 8),
+        new THREE.MeshStandardMaterial({ color: 0x3366ff, roughness: 0.6 })
+    );
+    hat.position.y = 1.03;
+    charGroup.add(hat);
+
+    charGroup.position.set(0, 0, 0.15);
+    cartGroup.add(charGroup);
+
+    // Wheels (visual)
+    const wheelMeshes = [];
+    const wheelPositions = [
+        new THREE.Vector3(-0.55, -0.15, -0.7),  // front-left
+        new THREE.Vector3(0.55, -0.15, -0.7),   // front-right
+        new THREE.Vector3(-0.55, -0.15, 0.7),   // rear-left
+        new THREE.Vector3(0.55, -0.15, 0.7),    // rear-right
+    ];
+
+    wheelPositions.forEach((pos, i) => {
+        const wheelGroup = new THREE.Group();
+        const wheelGeo = new THREE.CylinderGeometry(w.radius, w.radius, 0.18, 16);
+        const wheelMesh = new THREE.Mesh(wheelGeo, new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.8 }));
+        wheelMesh.rotation.z = Math.PI / 2;
+        wheelGroup.add(wheelMesh);
+
+        // Hubcap
+        const hubGeo = new THREE.CylinderGeometry(w.radius * 0.5, w.radius * 0.5, 0.19, 8);
+        const hub = new THREE.Mesh(hubGeo, new THREE.MeshStandardMaterial({ color: 0xaaaaaa, metalness: 0.6 }));
+        hub.rotation.z = Math.PI / 2;
+        wheelGroup.add(hub);
+
+        wheelGroup.position.copy(pos);
+        wheelGroup.castShadow = true;
+        cartGroup.add(wheelGroup);
+        wheelMeshes.push(wheelGroup);
+    });
+
+    cartGroup.castShadow = true;
+    scene.add(cartGroup);
+
+    // --- Physics ---
+    const spawnPos = { x: 0, y: 2, z: 15 }; // spawn on a road
+
+    const chassisDesc = RAPIER.RigidBodyDesc.dynamic()
+        .setTranslation(spawnPos.x, spawnPos.y, spawnPos.z)
+        .setLinearDamping(c.linearDamping)
+        .setAngularDamping(c.angularDamping)
+        .setCcdEnabled(true);
+    const chassisBody = physicsWorld.createRigidBody(chassisDesc);
+
+    // Chassis collider - slightly lowered center of mass
+    const chassisCollider = RAPIER.ColliderDesc.cuboid(0.6, 0.2, 1.0)
+        .setMass(c.mass)
+        .setTranslation(0, -0.05, 0); // lower center of mass
+    physicsWorld.createCollider(chassisCollider, chassisBody);
+
+    // Vehicle controller
+    const vehicle = physicsWorld.createVehicleController(chassisBody);
+
+    // Configure forward/up axes (Three.js: forward = -Z = axis 2, up = Y = axis 1)
+    vehicle.indexUpAxis = 1;
+    vehicle.setIndexForwardAxis = 2;
+
+    // Add wheels
+    const wheelPhysPositions = [
+        { x: -0.55, y: -0.15, z: -0.75 },  // front-left
+        { x: 0.55, y: -0.15, z: -0.75 },   // front-right
+        { x: -0.55, y: -0.15, z: 0.75 },   // rear-left
+        { x: 0.55, y: -0.15, z: 0.75 },    // rear-right
+    ];
+
+    const suspDir = { x: 0, y: -1, z: 0 };
+    const axle = { x: -1, y: 0, z: 0 };
+
+    for (let i = 0; i < 4; i++) {
+        vehicle.addWheel(wheelPhysPositions[i], suspDir, axle, s.restLength, w.radius);
+        vehicle.setWheelSuspensionStiffness(i, s.stiffness);
+        vehicle.setWheelSuspensionCompression(i, s.compression);
+        vehicle.setWheelSuspensionRelaxation(i, s.relaxation);
+        vehicle.setWheelMaxSuspensionTravel(i, s.maxTravel);
+        vehicle.setWheelMaxSuspensionForce(i, s.maxForce);
+        vehicle.setWheelFrictionSlip(i, w.frictionSlip);
+        vehicle.setWheelSideFrictionStiffness(i, w.sideFrictionStiffness);
+    }
+
+    // --- State ---
+    let isDrifting = false;
+    let currentSteer = 0; // smoothed steering
+    let lastEffectiveSteer = 0;
+
+    function resetCart() {
+        chassisBody.setTranslation(spawnPos, true);
+        chassisBody.setRotation({ x: 0, y: 0, z: 0, w: 1 }, true);
+        chassisBody.setLinvel({ x: 0, y: 0, z: 0 }, true);
+        chassisBody.setAngvel({ x: 0, y: 0, z: 0 }, true);
+    }
+
+    function update(dt) {
+        if (Input.reset) {
+            resetCart();
+            Input.reset = false;
+            return;
+        }
+
+        const throttle = getThrottle();
+        const steerInput = getSteering();
+
+        // Get current velocity in local frame
+        const vel = chassisBody.linvel();
+        const rot = chassisBody.rotation();
+
+        // Convert chassis rotation to Three.js quaternion for local frame math
+        const quat = new THREE.Quaternion(rot.x, rot.y, rot.z, rot.w);
+        const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(quat);
+        const right = new THREE.Vector3(1, 0, 0).applyQuaternion(quat);
+
+        const velVec = new THREE.Vector3(vel.x, vel.y, vel.z);
+        const forwardSpeed = velVec.dot(forward);
+        const lateralSpeed = velVec.dot(right);
+        const speed = Math.sqrt(forwardSpeed * forwardSpeed + lateralSpeed * lateralSpeed);
+
+        // --- Steering (smoothed) ---
+        const steerSpeed = 3.0 * dt; // how fast steering responds
+        const targetSteer = steerInput * c.maxSteerAngle;
+        if (Math.abs(targetSteer - currentSteer) < steerSpeed) {
+            currentSteer = targetSteer;
+        } else {
+            currentSteer += Math.sign(targetSteer - currentSteer) * steerSpeed;
+        }
+
+        // Reduce steering at high speed
+        const speedFactor = Math.max(0.3, 1 - speed / (c.maxSpeed * 1.2));
+        const effectiveSteer = currentSteer * speedFactor;
+
+        vehicle.setWheelSteering(0, effectiveSteer);
+        vehicle.setWheelSteering(1, effectiveSteer);
+
+        // --- Engine force ---
+        let engineForce = 0;
+        if (throttle > 0) {
+            const sFactor = Math.max(0, 1 - speed / c.maxSpeed);
+            engineForce = throttle * c.maxEngineForce * sFactor;
+        } else if (throttle < 0) {
+            engineForce = throttle * c.maxReverseForce;
+        }
+
+        // Apply to rear wheels (RWD) — negate because Rapier forward=+Z but visual forward=-Z
+        vehicle.setWheelEngineForce(2, -engineForce / 2);
+        vehicle.setWheelEngineForce(3, -engineForce / 2);
+
+        // --- Braking ---
+        if (!Input.handbrake && throttle === 0 && speed > 0.5) {
+            // Light engine brake
+            for (let i = 0; i < 4; i++) vehicle.setWheelBrake(i, 0.5);
+        } else if (!Input.handbrake) {
+            for (let i = 0; i < 4; i++) vehicle.setWheelBrake(i, 0);
+        }
+
+        // --- Handbrake / Drift ---
+        if (Input.handbrake) {
+            // Rear wheel brake
+            vehicle.setWheelBrake(2, 2.0);
+            vehicle.setWheelBrake(3, 2.0);
+            vehicle.setWheelBrake(0, 0);
+            vehicle.setWheelBrake(1, 0);
+
+            // Reduce rear friction for drift
+            vehicle.setWheelFrictionSlip(2, 0.8);
+            vehicle.setWheelFrictionSlip(3, 0.8);
+        } else {
+            vehicle.setWheelFrictionSlip(2, w.frictionSlip);
+            vehicle.setWheelFrictionSlip(3, w.frictionSlip);
+        }
+
+        // Update vehicle physics
+        vehicle.updateVehicle(dt);
+
+        // --- Custom Drift Layer ---
+        let grip = c.gripNormal;
+        const drifting = (Input.handbrake && speed > c.driftThreshold) ||
+                         (Math.abs(lateralSpeed) > speed * 0.3 && speed > c.driftThreshold);
+
+        if (Input.handbrake && speed > c.driftThreshold) {
+            grip = c.gripHandbrake;
+        } else if (Math.abs(steerInput) > 0.3 && speed > c.driftThreshold) {
+            grip = c.gripDrift;
+        }
+
+        isDrifting = drifting;
+
+        // Apply lateral correction impulse
+        const correctionImpulse = -lateralSpeed * grip * c.mass * dt;
+        const impulseVec = right.multiplyScalar(correctionImpulse);
+        chassisBody.applyImpulse({ x: impulseVec.x, y: 0, z: impulseVec.z }, true);
+
+        // Steering torque overlay for responsiveness
+        if (Math.abs(steerInput) > 0.1 && speed > 2) {
+            const steerTorque = steerInput * speed * c.steerTorqueMultiplier * dt;
+            chassisBody.applyTorqueImpulse({ x: 0, y: steerTorque, z: 0 }, true);
+        }
+
+        // --- Anti-flip ---
+        const up = new THREE.Vector3(0, 1, 0).applyQuaternion(quat);
+        const tilt = Math.acos(Math.min(1, up.dot(new THREE.Vector3(0, 1, 0))));
+        if (tilt > c.antiFlipThreshold) {
+            // Apply restoring torque
+            const restoreAxis = new THREE.Vector3(0, 1, 0).cross(up).normalize();
+            const restoreTorque = restoreAxis.multiplyScalar(-tilt * c.antiFlipTorque * dt);
+            chassisBody.applyTorqueImpulse({ x: restoreTorque.x, y: 0, z: restoreTorque.z }, true);
+        }
+
+        // Track steer for visual sync
+        lastEffectiveSteer = effectiveSteer;
+
+        // Check if fell off world (syncVisuals called from game loop)
+        const pos = chassisBody.translation();
+        if (pos.y < -10) {
+            resetCart();
+        }
+
+        return { speed, isDrifting, forwardSpeed };
+    }
+
+    function syncVisuals() {
+        const pos = chassisBody.translation();
+        const rotation = chassisBody.rotation();
+        cartGroup.position.set(pos.x, pos.y, pos.z);
+        cartGroup.quaternion.set(rotation.x, rotation.y, rotation.z, rotation.w);
+
+        // Update wheel visuals
+        for (let i = 0; i < 4; i++) {
+            const wheelRot = vehicle.wheelRotation(i);
+            if (wheelRot !== null) {
+                wheelMeshes[i].children[0].rotation.x = wheelRot;
+                wheelMeshes[i].children[1].rotation.x = wheelRot;
+            }
+            if (i < 2) {
+                wheelMeshes[i].rotation.y = lastEffectiveSteer;
+            }
+        }
+    }
+
+    return { group: cartGroup, body: chassisBody, vehicle, update, syncVisuals, resetCart, wheelMeshes, charGroup };
+}
+
+// ========== SECTION 6.5: PLAYER (STATE MACHINE + ON-FOOT CONTROLLER) ==========
+function createPlayer(scene, physicsWorld, RAPIER, cart, camera) {
+    const p = CONFIG.player;
+    const charGroup = cart.charGroup;
+    let state = 'DRIVING'; // 'DRIVING' or 'ON_FOOT'
+
+    // --- Rapier KinematicCharacterController ---
+    const kcc = physicsWorld.createCharacterController(0.01);
+    kcc.setMaxSlopeClimbAngle(p.maxSlopeAngle);
+    kcc.setMinSlopeSlideAngle(p.maxSlopeAngle);
+    kcc.enableSnapToGround(p.snapToGround);
+    kcc.enableAutostep(0.3, 0.2, true);
+
+    // Kinematic body for on-foot character (parked off-world initially)
+    const charBodyDesc = RAPIER.RigidBodyDesc.kinematicPositionBased()
+        .setTranslation(0, -100, 0);
+    const charBody = physicsWorld.createRigidBody(charBodyDesc);
+    const charCollider = physicsWorld.createCollider(
+        RAPIER.ColliderDesc.capsule(p.capsuleHalfHeight, p.capsuleRadius).setMass(1.0),
+        charBody
+    );
+
+    let verticalVelocity = 0;
+    let isGrounded = false;
+
+    function exitVehicle() {
+        const cartPos = cart.group.position.clone();
+        const cartQuat = cart.group.quaternion.clone();
+        const right = new THREE.Vector3(1, 0, 0).applyQuaternion(cartQuat);
+        const exitPos = cartPos.clone().add(right.multiplyScalar(p.exitOffset));
+        exitPos.y = cartPos.y + 0.5;
+
+        // Detach character from cart, add to scene
+        cart.group.remove(charGroup);
+        charGroup.position.copy(exitPos);
+        charGroup.rotation.set(0, 0, 0);
+        scene.add(charGroup);
+
+        // Position physics body (capsule center is at capsule middle)
+        charBody.setNextKinematicTranslation({
+            x: exitPos.x,
+            y: exitPos.y + p.capsuleHalfHeight + p.capsuleRadius,
+            z: exitPos.z
+        });
+
+        // Face away from cart
+        const cartEuler = new THREE.Euler().setFromQuaternion(cartQuat);
+        charYaw = cartEuler.y + Math.PI / 2; // face to the right (exit direction)
+
+        verticalVelocity = 0;
+        isGrounded = false;
+        state = 'ON_FOOT';
+    }
+
+    function enterVehicle() {
+        scene.remove(charGroup);
+        charGroup.position.set(0, 0, 0.15);
+        charGroup.rotation.set(0, 0, 0);
+        cart.group.add(charGroup);
+
+        // Park physics body off-world
+        charBody.setNextKinematicTranslation({ x: 0, y: -100, z: 0 });
+
+        state = 'DRIVING';
+    }
+
+    function distToCart() {
+        return charGroup.position.distanceTo(cart.group.position);
+    }
+
+    let charYaw = 0; // character facing angle
+
+    function updateOnFoot(dt) {
+        // Gravity
+        verticalVelocity -= 15 * dt;
+
+        // Jump (Space = handbrake in Input, reused as jump when on foot)
+        if (Input.handbrake && isGrounded) {
+            verticalVelocity = p.jumpImpulse;
+            isGrounded = false;
+        }
+
+        // Turn with A/D
+        const turnSpeed = 4.0;
+        if (Input.left) charYaw += turnSpeed * dt;
+        if (Input.right) charYaw -= turnSpeed * dt;
+
+        // Move forward/back relative to character facing
+        let worldMove = new THREE.Vector3(0, 0, 0);
+        const charForward = new THREE.Vector3(-Math.sin(charYaw), 0, -Math.cos(charYaw));
+
+        if (Input.forward) {
+            worldMove.addScaledVector(charForward, p.runSpeed * dt);
+        }
+        if (Input.backward) {
+            worldMove.addScaledVector(charForward, -p.runSpeed * 0.5 * dt);
+        }
+
+        charGroup.rotation.y = charYaw;
+
+        // Add vertical
+        worldMove.y = verticalVelocity * dt;
+
+        // Use KCC to compute collision-corrected movement
+        kcc.computeColliderMovement(charCollider, worldMove);
+        const corrected = kcc.computedMovement();
+
+        // Apply
+        const currentPos = charBody.translation();
+        const newPos = {
+            x: currentPos.x + corrected.x,
+            y: currentPos.y + corrected.y,
+            z: currentPos.z + corrected.z,
+        };
+        charBody.setNextKinematicTranslation(newPos);
+
+        // Sync visual to physics (offset down by capsule center)
+        charGroup.position.set(
+            newPos.x,
+            newPos.y - p.capsuleHalfHeight - p.capsuleRadius,
+            newPos.z
+        );
+
+        // Ground check
+        isGrounded = kcc.computedGrounded();
+        if (isGrounded && verticalVelocity < 0) {
+            verticalVelocity = 0;
+        }
+
+        // Fall off world check
+        if (newPos.y < -10) {
+            const resetPos = { x: 0, y: 2, z: 15 };
+            charBody.setNextKinematicTranslation(resetPos);
+            charGroup.position.set(resetPos.x, resetPos.y, resetPos.z);
+            verticalVelocity = 0;
+        }
+    }
+
+    function update(dt) {
+        // Handle interact (one-shot)
+        if (Input.interactPressed) {
+            Input.interactPressed = false;
+            if (state === 'DRIVING') {
+                exitVehicle();
+                return state;
+            } else if (state === 'ON_FOOT') {
+                if (distToCart() < p.enterExitRadius) {
+                    enterVehicle();
+                    return state;
+                }
+            }
+        }
+
+        if (state === 'ON_FOOT') {
+            updateOnFoot(dt);
+        }
+
+        return state;
+    }
+
+    function getState() { return state; }
+
+    function getTrackingTarget() {
+        return state === 'DRIVING' ? cart.group : charGroup;
+    }
+
+    function nearVehicle() {
+        return state === 'ON_FOOT' && distToCart() < p.enterExitRadius;
+    }
+
+    return { update, getState, getTrackingTarget, nearVehicle, charGroup };
+}
+
+// ========== SECTION 7: CAMERA CONTROLLER ==========
+function createCameraController(camera) {
+    const cam = CONFIG.camera;
+    const lookTarget = new THREE.Vector3();
+    let currentFov = cam.fovNormal;
+
+    function update(target, targetState, dt) {
+        const isOnFoot = targetState.mode === 'ON_FOOT';
+        const p = CONFIG.player;
+
+        const offset = isOnFoot ? p.cameraOffset : cam.offset;
+        const lookAhead = isOnFoot ? p.cameraLookAhead : cam.lookAhead;
+        const smoothPos = isOnFoot
+            ? p.cameraSmoothPos
+            : (targetState.isDrifting ? cam.smoothPositionDrift : cam.smoothPosition);
+        const smoothLook = isOnFoot ? p.cameraSmoothLook : cam.smoothLookAt;
+
+        // Desired position behind target
+        const desiredPos = offset.clone()
+            .applyQuaternion(target.quaternion)
+            .add(target.position);
+
+        camera.position.lerp(desiredPos, smoothPos);
+
+        // Look-at target
+        const desiredLook = lookAhead.clone()
+            .applyQuaternion(target.quaternion)
+            .add(target.position);
+
+        lookTarget.lerp(desiredLook, smoothLook);
+        camera.lookAt(lookTarget);
+
+        // FOV shift (only when driving)
+        const targetFov = (!isOnFoot && targetState.isDrifting) ? cam.fovDrift : cam.fovNormal;
+        currentFov += (targetFov - currentFov) * cam.fovSmooth;
+        camera.fov = currentFov;
+        camera.updateProjectionMatrix();
+    }
+
+    return { update };
+}
+
+// ========== SECTION 8: HUD ==========
+const hudEls = {};
+function initHUD() {
+    hudEls.speed = document.getElementById('speed');
+    hudEls.drift = document.getElementById('drift-indicator');
+    hudEls.hud = document.getElementById('hud');
+    hudEls.controls = document.getElementById('controls-hint');
+    hudEls.vehiclePrompt = document.getElementById('vehicle-prompt');
+}
+
+function updateHUD(cartState, playerState, nearVehicle) {
+    if (!hudEls.speed) initHUD();
+
+    if (playerState === 'DRIVING') {
+        hudEls.hud.style.display = 'block';
+        const mph = Math.abs(Math.round(cartState.speed * 2.5));
+        hudEls.speed.textContent = mph;
+
+        if (cartState.isDrifting) {
+            hudEls.drift.classList.add('active');
+        } else {
+            hudEls.drift.classList.remove('active');
+        }
+
+        hudEls.controls.innerHTML = 'WASD / Arrows — Drive<br>SPACE — Drift<br>E — Exit Cart<br>R — Reset Cart';
+        hudEls.vehiclePrompt.classList.remove('visible');
+    } else {
+        hudEls.hud.style.display = 'none';
+        hudEls.controls.innerHTML = 'WASD / Arrows — Run<br>SPACE — Jump<br>E — Enter Cart<br>R — Reset';
+
+        if (nearVehicle) {
+            hudEls.vehiclePrompt.classList.add('visible');
+        } else {
+            hudEls.vehiclePrompt.classList.remove('visible');
+        }
+    }
+}
+
+// ========== SECTION 9: SKID MARKS ==========
+function createSkidSystem(scene) {
+    const maxMarks = 500;
+    const markSize = 0.3;
+    const geometry = new THREE.PlaneGeometry(markSize, markSize * 2);
+    const material = new THREE.MeshBasicMaterial({
+        color: 0x333333,
+        transparent: true,
+        opacity: 0.4,
+        depthWrite: false,
+    });
+
+    const marks = [];
+    let markTimer = 0;
+
+    function addMark(position, rotation) {
+        const mark = new THREE.Mesh(geometry, material.clone());
+        mark.rotation.x = -Math.PI / 2;
+        mark.rotation.z = rotation;
+        mark.position.copy(position);
+        mark.position.y = 0.02;
+        scene.add(mark);
+        marks.push({ mesh: mark, life: 1.0 });
+
+        if (marks.length > maxMarks) {
+            const old = marks.shift();
+            scene.remove(old.mesh);
+            old.mesh.geometry.dispose();
+            old.mesh.material.dispose();
+        }
+    }
+
+    function update(cartGroup, cartState, dt) {
+        markTimer -= dt;
+        if (cartState.isDrifting && markTimer <= 0) {
+            markTimer = 0.03; // new mark every 30ms during drift
+
+            // Add marks at rear wheel positions
+            const rearLeft = new THREE.Vector3(-0.55, 0, 0.7).applyQuaternion(cartGroup.quaternion).add(cartGroup.position);
+            const rearRight = new THREE.Vector3(0.55, 0, 0.7).applyQuaternion(cartGroup.quaternion).add(cartGroup.position);
+
+            const yRot = Math.atan2(
+                2 * (cartGroup.quaternion.w * cartGroup.quaternion.y),
+                1 - 2 * (cartGroup.quaternion.y * cartGroup.quaternion.y)
+            );
+
+            addMark(rearLeft, yRot);
+            addMark(rearRight, yRot);
+        }
+
+        // Fade old marks
+        for (let i = marks.length - 1; i >= 0; i--) {
+            marks[i].life -= dt * 0.05; // fade over ~20 seconds
+            marks[i].mesh.material.opacity = marks[i].life * 0.4;
+            if (marks[i].life <= 0) {
+                scene.remove(marks[i].mesh);
+                marks[i].mesh.geometry.dispose();
+                marks[i].mesh.material.dispose();
+                marks.splice(i, 1);
+            }
+        }
+    }
+
+    return { update };
+}
+
+// ========== SECTION 10: MAIN ==========
+async function main() {
+    const loadingEl = document.getElementById('loading');
+
+    // Load Rapier
+    let RAPIER;
+    try {
+        RAPIER = await import('https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.14.0/rapier.es.js');
+        await RAPIER.init();
+    } catch (e) {
+        loadingEl.querySelector('.subtitle').textContent = 'Failed to load physics! Try refreshing.';
+        console.error('Rapier load failed:', e);
+        return;
+    }
+
+    loadingEl.querySelector('.subtitle').textContent = 'Building suburb...';
+
+    // Physics world
+    const gravity = { x: 0, y: -15, z: 0 }; // slightly stronger gravity for snappier feel
+    const physicsWorld = new RAPIER.World(gravity);
+
+    // Scene
+    const { renderer, scene, camera } = createScene();
+    const mats = createMaterials();
+
+    // Build world
+    const { dynamicBodies } = buildWorld(scene, physicsWorld, RAPIER, mats);
+
+    // Create cart
+    const cart = createCart(scene, physicsWorld, RAPIER);
+
+    // Camera
+    const camCtrl = createCameraController(camera);
+
+    // Player (state machine: DRIVING / ON_FOOT)
+    const player = createPlayer(scene, physicsWorld, RAPIER, cart, camera);
+
+    // Skid marks
+    const skids = createSkidSystem(scene);
+
+    // Hide loading
+    loadingEl.style.display = 'none';
+
+    // --- Game Loop ---
+    const PHYSICS_DT = 1 / 60;
+    let accumulator = 0;
+    let lastTime = performance.now();
+    let cartState = { speed: 0, isDrifting: false, forwardSpeed: 0 };
+
+    function gameLoop(currentTime) {
+        requestAnimationFrame(gameLoop);
+
+        const frameTime = Math.min((currentTime - lastTime) / 1000, 0.1);
+        lastTime = currentTime;
+        accumulator += frameTime;
+
+        // Fixed-step physics
+        while (accumulator >= PHYSICS_DT) {
+            const pState = player.update(PHYSICS_DT);
+
+            if (pState === 'DRIVING') {
+                cartState = cart.update(PHYSICS_DT) || cartState;
+            }
+
+            physicsWorld.step();
+            accumulator -= PHYSICS_DT;
+        }
+
+        // Always sync cart visuals (even when on foot — cart still has physics)
+        cart.syncVisuals();
+
+        // Sync dynamic bodies (knockable objects)
+        for (const { mesh, body } of dynamicBodies) {
+            const pos = body.translation();
+            const rot = body.rotation();
+            mesh.position.set(pos.x, pos.y, pos.z);
+            mesh.quaternion.set(rot.x, rot.y, rot.z, rot.w);
+        }
+
+        // Camera — follow the right target
+        const currentState = player.getState();
+        const target = player.getTrackingTarget();
+        if (currentState === 'DRIVING') {
+            camCtrl.update(target, { ...cartState, mode: 'DRIVING' }, frameTime);
+            skids.update(cart.group, cartState, frameTime);
+        } else {
+            camCtrl.update(target, { mode: 'ON_FOOT', isDrifting: false, speed: 0 }, frameTime);
+            // Still fade existing skid marks
+            skids.update(cart.group, { isDrifting: false }, frameTime);
+        }
+
+        // HUD
+        updateHUD(cartState, currentState, player.nearVehicle());
+
+        // Render
+        renderer.render(scene, camera);
+    }
+
+    requestAnimationFrame(gameLoop);
+}
+
+main().catch(console.error);
+    </script>
+</body>
+</html>
