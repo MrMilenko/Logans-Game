@@ -94,6 +94,8 @@ common/physics_ticks_per_second=60
 
 [rendering]
 
+textures/vram_compression/import_etc2_astc=true
+textures/vram_compression/import_s3tc_bptc=true
 anti_aliasing/quality/msaa_3d=3
 textures/default_filters/anisotropic_filtering_level=4
 environment/defaults/default_clear_color=Color(0.529, 0.808, 0.922, 1)

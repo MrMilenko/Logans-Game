@@ -11,7 +11,5 @@
 *.sublime-*
 .vscode/
 
-# Export
-export/
-*.dmg
+# Export (builds are tracked in repo)
 *.app
